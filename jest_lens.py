@@ -538,7 +538,11 @@ def baselines(run_id: str) -> dict | None:
     tail_text = "".join(tail)
     missed = [suite for suite in dict.fromkeys(parsed.failed_suites)
               if suite not in tail_text]
+    # A pre-test error has no summary and no failure blocks: the crash text is
+    # the whole report, and there is no structure in the log to price it
+    # against. Reporting zero would read as the same facts costing nothing.
     return {
+        "measurable": bool(parsed.summary or parsed.blocks),
         "by_hand": by_hand,
         "tail": len(tail_text.encode("utf-8", "replace")),
         "missed": missed,
@@ -562,7 +566,7 @@ def audit(run_id: str | None) -> int:
             sys.exit(f"jest-lens: `{run_id}` stored no output to audit")
         measured = baselines(run_id)
         covered = 1 if measured else 0
-        scope = ""
+        scope = hand_only = ""
         captured_note = "kept for recovery, never printed"
         counts = ", ".join(f"{n} {kind}" for kind, n in (meta.get("counts") or {}).items() if n)
         where = os.path.basename(meta.get("cwd", "")) or "?"
@@ -575,12 +579,14 @@ def audit(run_id: str | None) -> int:
         stored, emitted, total = totals["raw_bytes"], totals["emitted"], totals["runs"]
         reconstructed = False
         measured = {"by_hand": 0, "tail": 0, "missed": [], "failed_suites": 0}
-        covered = 0
+        covered = unmeasurable = 0
         for path in stored_runs():
             one = baselines(path.stem)
             if not one:
                 continue
             covered += 1
+            if not one["measurable"]:
+                unmeasurable += 1
             measured["by_hand"] += one["by_hand"]
             measured["tail"] += one["tail"]
             measured["missed"] += one["missed"]
@@ -588,14 +594,19 @@ def audit(run_id: str | None) -> int:
         scope = "" if covered == total else f" ({covered} of {total} still stored)"
         captured_note = ("all-time, including runs since pruned"
                          if covered < total else "kept for recovery, never printed")
+        hand_only = f", {unmeasurable} a pre-test error" if unmeasurable else ""
         heading = f"Lifetime — {total:,} runs tallied"
         label = "Runs"
 
     rows = [(label, total, None),
             ("Emitted", emitted, "what jest-lens printed")]
     if covered:
-        rows.append(("Same facts by hand", measured["by_hand"],
-                     f"failure blocks + counts, uncompressed{scope}"))
+        if measured.get("measurable", True):
+            rows.append(("Same facts by hand", measured["by_hand"],
+                         f"failure blocks + counts, uncompressed{scope}{hand_only}"))
+        else:
+            rows.append(("Same facts by hand", None,
+                         "n/a — pre-test error, the crash text is the report"))
         suites = measured["failed_suites"]
         plural = "suite" if suites == 1 else "suites"
         if measured["missed"]:
@@ -608,15 +619,19 @@ def audit(run_id: str | None) -> int:
     rows.append(("Captured", stored, captured_note))
 
     name = max(len(row[0]) for row in rows)
-    width = max(max(len(f"{row[1]:,}") for row in rows), len("bytes"))
-    tokens = max(max(len(f"{row[1] // 4:,}") for row in rows), len("est tokens"))
+    sized = [row for row in rows if row[1] is not None]
+    width = max(max(len(f"{row[1]:,}") for row in sized), len("bytes"))
+    tokens = max(max(len(f"{row[1] // 4:,}") for row in sized), len("est tokens"))
 
     print(heading)
     print()
     print(f"{'':<{name}}   {'bytes':>{width}}  {'est tokens':>{tokens}}")
     for text, value, note in rows:
-        line = f"{text:<{name}} : {value:>{width},}  "
-        line += "" if text == label else f"{value // 4:>{tokens},}"
+        if value is None:
+            line = f"{text:<{name}} : {'—':>{width}}  {'':>{tokens}}"
+        else:
+            line = f"{text:<{name}} : {value:>{width},}  "
+            line += "" if text == label else f"{value // 4:>{tokens},}"
         if note:
             line = f"{line:<{name + width + tokens + 6}}  {note}"
         print(line.rstrip())
