@@ -5,9 +5,9 @@ description: Run Jest and get a short report instead of tens of thousands of lin
 
 # jest-lens
 
-Run Jest however the repo needs, and pipe its output through `jest_lens.py`,
-which sits beside this file. Invoke it by absolute path. Examples below write
-`<jl>` for `python3 /that/path/jest_lens.py`.
+Run Jest however the repo needs, and pipe its output through the
+`jest_lens.py` that sits beside this file, invoked by its absolute path.
+Examples below write `<jl>` for `python3 /that/path/jest_lens.py`.
 
 ```bash
 yarn jest path/to/thing.test.ts 2>&1 | <jl>
