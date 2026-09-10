@@ -1,6 +1,6 @@
 ---
 name: jest-lens
-description: Run Jest and get a short report instead of tens of thousands of lines. Use for any request to run tests, run jest, check or verify a suite, re-run a failing test, or ask what the tests printed; also after editing code and before a commit or PR. The full output stays recoverable by run id.
+description: Run Jest and get a short report instead of tens of thousands of lines, keeping the full output under a run id. Use for any request to run tests, run jest, check or verify a suite, or re-run a failing test; also after editing code and before a commit or PR. When the question is what a run printed or logged, grep that stored run by its id rather than re-running the suite.
 ---
 
 # jest-lens
@@ -22,7 +22,8 @@ stream; Jest's own exit code is lost to the pipe.
 ## Recovering what the report omits
 
 Jest keeps console output out of its failure blocks, and the report caps those
-blocks. The stored run holds everything.
+blocks. The stored run holds everything, so a question about what a run
+printed is answered by reading it, not by running the suite again.
 
 ```bash
 <jl> --console a3f19c        # console output, absent from failures
