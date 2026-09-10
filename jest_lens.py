@@ -88,6 +88,13 @@ def restrict(path: Path) -> None:
         pass
 
 
+def open_private(path: Path, buffering: int = -1):
+    """Open a path for writing, created 0600, never widened by the umask."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    restrict(path)  # an existing file keeps its old mode through O_CREAT
+    return open(fd, "w", buffering=buffering, errors="replace")
+
+
 def log_path(run_id: str) -> Path:
     return CACHE_DIR / f"{run_id}.log"
 
@@ -337,7 +344,7 @@ def report(run_id: str, parsed: Parsed, log: Path) -> tuple[int, str]:
         text = "\n".join(body)
         print(text)
         print()
-        written += len(text)
+        written += len(text.encode("utf-8", "replace"))
 
     omitted = len(failures) - shown
     if omitted > 0:
@@ -484,9 +491,7 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, on_sigint)
 
-    log.touch()
-    restrict(log)
-    with log.open("w", buffering=1, errors="replace") as sink:
+    with open_private(log, buffering=1) as sink:
         try:
             parsed = parse(tee(sys.stdin, sink))
         except KeyboardInterrupt:
@@ -496,17 +501,16 @@ def main() -> int:
             return 130
 
     code, result = report(run_id, parsed, log)
-    meta_path(run_id).write_text(
-        json.dumps(
+    with open_private(meta_path(run_id)) as meta:
+        json.dump(
             {
                 "cwd": os.getcwd(),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "result": result,
                 "counts": parsed.counts,
-            }
+            },
+            meta,
         )
-    )
-    restrict(meta_path(run_id))
     prune()
     return code
 

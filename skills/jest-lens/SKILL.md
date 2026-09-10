@@ -17,7 +17,8 @@ this plugin's root. Below, `<jl>` stands for whichever applies.
 
 You get the counts, the failure blocks up to a ~5KB cap, and a run id. Exit
 status is 0 on a pass, 1 on failures or a pre-test error, 2 on an unparseable
-stream; Jest's own exit code is lost to the pipe.
+stream, and 130 on Ctrl-C, which still keeps the partial run. Jest's own exit
+code is lost to the pipe.
 
 ## Recovering what the report omits
 
