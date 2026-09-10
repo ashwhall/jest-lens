@@ -9,6 +9,9 @@
   },
   "homepage": "https://github.com/ashwhall/jest-lens",
   "license": "MIT",
-  "keywords": ["jest", "testing", "context"],
-  "skills": ["./"]
+  "keywords": [
+    "jest",
+    "testing",
+    "context"
+  ]
 }

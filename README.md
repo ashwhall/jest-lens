@@ -27,15 +27,12 @@ $ python3 jest_lens.py --failed-paths # failing suite paths, to compose a rerun
 
 The id defaults to the last run. Stdlib-only Python, nothing to build.
 
-As a Claude Code skill, either install the plugin:
+## As a Claude Code plugin
 
 ```console
 $ claude plugin marketplace add ashwhall/jest-lens
 $ claude plugin install jest-lens@jest-lens
 ```
 
-or clone straight into your skills directory:
-
-```console
-$ git clone https://github.com/ashwhall/jest-lens ~/.claude/skills/jest-lens
-```
+The skill then fires on any request to run tests, and invokes the script from
+`$CLAUDE_PLUGIN_ROOT`. It costs ~105 tokens always-on and ~590 when it fires.

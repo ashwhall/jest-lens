@@ -5,13 +5,15 @@ description: Run Jest and get a short report instead of tens of thousands of lin
 
 # jest-lens
 
-Run Jest however the repo needs, and pipe its output through the
-`jest_lens.py` that sits beside this file, invoked by its absolute path.
-Examples below write `<jl>` for `python3 /that/path/jest_lens.py`.
+Run Jest however the repo needs, and pipe its output through this plugin's
+`jest_lens.py`:
 
 ```bash
-yarn jest path/to/thing.test.ts 2>&1 | <jl>
+yarn jest path/to/thing.test.ts 2>&1 | python3 "$CLAUDE_PLUGIN_ROOT/jest_lens.py"
 ```
+
+If `CLAUDE_PLUGIN_ROOT` is unset, use the absolute path of the `jest_lens.py`
+at the root of this plugin. Examples below write `<jl>` for whichever applies.
 
 **The `2>&1` is not optional.** Jest reports to stderr, so without it the pipe
 gets the package manager's banner and nothing else. The tool will tell you when
@@ -57,8 +59,8 @@ This tool never runs Jest. Picking the runner, the node version and the flags
 is yours, because the repo's requirements are not derivable from its lockfile.
 
 - Runner: `yarn jest`, `pnpm jest`, `pnpm nx test <project>`, or `npx jest`.
-- Node: repos pin incompatible majors. Where a `.nvmrc` or `.node-version`
-  exists, run `fnm use` first; it persists across later commands.
+- Node: where a repo pins a version, activate it first. A wrong major crashes
+  at module load, and native modules are the usual casualty.
 - To inherit the repo's own tuned Jest flags, pipe its script instead:
   `yarn test 2>&1 | <jl>`. Watch for a `test` script that also runs a linter,
   whose exit code then reads as a test failure.
