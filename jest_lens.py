@@ -504,13 +504,17 @@ def replay_emitted(run_id: str) -> int | None:
 
 
 def tail_bytes(run_id: str) -> int:
-    """The last `TAIL_BASELINE` lines of a stored log, as a byte count."""
+    """The last `TAIL_BASELINE` lines of a stored log, as a byte count.
+
+    Read as bytes, not text: decoding would normalise line endings and so
+    report a count the log does not have, when the whole point is to match
+    what `tail -n | wc -c` would have cost.
+    """
     log = log_path(run_id)
     if not log.exists():
         return 0
-    with log.open(errors="replace") as handle:
-        return len("".join(collections.deque(handle, maxlen=TAIL_BASELINE))
-                   .encode("utf-8", "replace"))
+    with log.open("rb") as handle:
+        return len(b"".join(collections.deque(handle, maxlen=TAIL_BASELINE)))
 
 
 def audit(run_id: str | None) -> int:
@@ -564,11 +568,13 @@ def audit(run_id: str | None) -> int:
 
     print()
     delta = tail - emitted
-    share = abs(delta) / tail * 100 if tail else 0
+    # Against an empty tail there is no share to take: the percentage would be
+    # a division by zero, not a zero.
+    share = f" ({abs(delta) / tail * 100:.0f}%)" if tail else ""
     if delta >= 0:
-        print(f"Saved vs tail -{TAIL_BASELINE}: {abs(delta):,} bytes ({share:.0f}%)")
+        print(f"Saved vs tail -{TAIL_BASELINE}: {abs(delta):,} bytes{share}")
     else:
-        print(f"Cost vs tail -{TAIL_BASELINE}: {abs(delta):,} bytes more ({share:.0f}%)")
+        print(f"Cost vs tail -{TAIL_BASELINE}: {abs(delta):,} bytes more{share}")
     print("Tokens estimated at four bytes each.")
     if reconstructed:
         print(f"Emitted is reconstructed from this run's log; recovery calls are "
