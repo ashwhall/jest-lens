@@ -74,6 +74,20 @@ def new_run_id() -> str:
             return run_id
 
 
+def restrict(path: Path) -> None:
+    """Keep a stored run to this user.
+
+    Test output carries whatever the suite logged, which can include tokens
+    pulled from the environment, so the default umask is too generous. Best
+    effort: a filesystem that cannot represent the mode is not worth failing a
+    test run over.
+    """
+    try:
+        path.chmod(0o700 if path.is_dir() else 0o600)
+    except OSError:
+        pass
+
+
 def log_path(run_id: str) -> Path:
     return CACHE_DIR / f"{run_id}.log"
 
@@ -126,7 +140,9 @@ def clean(line: str) -> str:
 class Parsed:
     def __init__(self) -> None:
         self.summary: list[str] = []
-        self.blocks: list[tuple[str, list[str]]] = []
+        # (title, body, is_console) — console blocks are Jest's captured
+        # output, kept apart from failures but bounded the same way.
+        self.blocks: list[tuple[str, list[str], bool]] = []
         self.counts: dict[str, int] = {}
         self.duration = ""
         self.snapshots_failed = 0
@@ -138,16 +154,18 @@ class Parsed:
         self.saw_suite_line = False
 
 
-def parse(lines) -> Parsed:
-    """Consume the stream, echoing suite progress to stderr as it arrives.
+def parse(lines, echo: bool = True, block_max_lines: int | None = BLOCK_MAX_LINES) -> Parsed:
+    """Consume the stream, optionally echoing suite progress to stderr.
 
-    Passes echo as a single dot: this output lands in a calling agent's context,
-    where one line per suite would cost more than the report it accompanies.
+    Passes echo as a single dot: that output lands in a calling agent's
+    context, where one line per suite would cost more than the report it
+    accompanies. Re-reading a stored run passes `echo=False`, and no block cap.
     """
     out = Parsed()
     block: list[str] | None = None
     title = ""
     suite_path = ""
+    is_console = False
     dots = 0
 
     for raw in lines:
@@ -160,16 +178,17 @@ def parse(lines) -> Parsed:
             # Jest prints a suite's `●` blocks directly under its result line,
             # so this both closes the previous block and names the next ones.
             if block is not None:
-                out.blocks.append((title, block))
+                out.blocks.append((title, block, is_console))
                 block = None
             suite_path = suite.group(2)
             if suite.group(1) == "FAIL":
                 out.failed_suites.append(suite.group(2))
-                if dots:
+                if echo and dots:
                     print(file=sys.stderr, flush=True)
                     dots = 0
-                print(line, file=sys.stderr, flush=True)
-            else:
+                if echo:
+                    print(line, file=sys.stderr, flush=True)
+            elif echo:
                 print(".", end="", file=sys.stderr, flush=True)
                 dots += 1
 
@@ -184,15 +203,15 @@ def parse(lines) -> Parsed:
         bullet = BULLET.match(line)
         if bullet:
             if block is not None:
-                out.blocks.append((title, block))
-                block = None
+                out.blocks.append((title, block, is_console))
             heading = bullet.group(1).strip()
             title = f"{suite_path} › {heading}" if suite_path else heading
-            if not heading.startswith(NON_FAILURE_BULLETS):
-                block = []
+            is_console = heading.startswith("Console")
+            # Other non-failure bullets are warnings with nothing to report.
+            block = [] if is_console or not heading.startswith(NON_FAILURE_BULLETS) else None
         elif SUMMARY.match(line):
             if block is not None:
-                out.blocks.append((title, block))
+                out.blocks.append((title, block, is_console))
                 block = None
             out.summary.append(line)
             if line.startswith("Tests:"):
@@ -205,16 +224,16 @@ def parse(lines) -> Parsed:
             elif line.startswith("Time:"):
                 out.duration = line.split(":", 1)[1].strip()
         elif block is not None and BLOCK_END.match(line):
-            out.blocks.append((title, block))
+            out.blocks.append((title, block, is_console))
             block = None
-        elif block is not None and len(block) < BLOCK_MAX_LINES:
+        elif block is not None and (block_max_lines is None or len(block) < block_max_lines):
             if line.strip() or block:
                 block.append(line)
 
-    if dots:
+    if echo and dots:
         print(file=sys.stderr, flush=True)
     if block is not None:
-        out.blocks.append((title, block))
+        out.blocks.append((title, block, is_console))
     return out
 
 
@@ -262,17 +281,24 @@ def report(run_id: str, parsed: Parsed, log: Path) -> tuple[int, str]:
             print(hint)
             return 1, "no-tests"
 
-        if not parsed.saw_suite_line and not parsed.error_shaped and parsed.lines < 20:
-            print(
-                "jest-lens: no Jest output in the stream. Jest reports to stderr,\n"
-                "so the pipeline needs `2>&1`:  yarn jest 2>&1 | jest_lens.py",
-                file=sys.stderr,
-            )
+        if not parsed.saw_suite_line and not parsed.error_shaped:
+            print("RESULT: no Jest output in the stream")
+            print()
+            if parsed.lines < 20:
+                print("Jest reports to stderr, so the pipeline needs `2>&1`:")
+                print("  yarn jest 2>&1 | jest_lens.py")
+                print()
+            print("\n".join(log.read_text(errors="replace").splitlines()[-TAIL_LINES:]))
+            print()
+            print(hint)
+            return 2, "unparseable"
+
         print("RESULT: pre-test error (Jest printed no summary)")
         print(f"AMBIENT NODE: {ambient_node()}")
         print()
-        if parsed.blocks:
-            title, body = parsed.blocks[0]
+        failures = [(t, b) for t, b, console in parsed.blocks if not console]
+        if failures:
+            title, body = failures[0]
             print(f"● {title}")
             print("\n".join(body))
         else:
@@ -300,9 +326,10 @@ def report(run_id: str, parsed: Parsed, log: Path) -> tuple[int, str]:
         print(hint)
         return 0, "pass"
 
+    failures = [(t, b) for t, b, console in parsed.blocks if not console]
     shown = 0
     written = 0
-    for title, body in parsed.blocks:
+    for title, body in failures:
         if written >= REPORT_MAX_BYTES:
             break
         shown += 1
@@ -312,7 +339,7 @@ def report(run_id: str, parsed: Parsed, log: Path) -> tuple[int, str]:
         print()
         written += len(text)
 
-    omitted = len(parsed.blocks) - shown
+    omitted = len(failures) - shown
     if omitted > 0:
         print(f"[TRUNCATED: {omitted} more. All blocks: jest_lens.py --all-failures {run_id}]")
         print()
@@ -333,22 +360,19 @@ def dump_logs(run_id: str) -> None:
 
 
 def dump_sections(run_id: str, want_console: bool) -> None:
-    """Reparse a stored log and print every failure block, or every console
-    block, untruncated."""
-    keep = False
-    for line in log_path(run_id).read_text(errors="replace").splitlines():
-        bullet = BULLET.match(line)
-        if bullet:
-            title = bullet.group(1).strip()
-            keep = title.startswith("Console") if want_console else not title.startswith(NON_FAILURE_BULLETS)
-            if keep:
-                print()
-                print(line)
+    """Print a stored run's failure blocks, or its console blocks, uncapped.
+
+    Goes through `parse` rather than rescanning, so the block boundaries and
+    the suite-qualified headings match what the report showed.
+    """
+    with log_path(run_id).open(errors="replace") as log:
+        parsed = parse(log, echo=False, block_max_lines=None)
+    for title, body, is_console in parsed.blocks:
+        if is_console != want_console:
             continue
-        if SUMMARY.match(line):
-            keep = False
-        if keep:
-            print(line)
+        print(f"● {title}")
+        print("\n".join(body))
+        print()
 
 
 def dump_failed_paths(run_id: str) -> None:
@@ -406,6 +430,7 @@ def main() -> int:
     args = ap.parse_args()
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    restrict(CACHE_DIR)
 
     if args.list_runs:
         list_runs()
@@ -459,6 +484,8 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, on_sigint)
 
+    log.touch()
+    restrict(log)
     with log.open("w", buffering=1, errors="replace") as sink:
         try:
             parsed = parse(tee(sys.stdin, sink))
@@ -479,6 +506,7 @@ def main() -> int:
             }
         )
     )
+    restrict(meta_path(run_id))
     prune()
     return code
 
