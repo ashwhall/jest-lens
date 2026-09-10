@@ -9,7 +9,7 @@ lines, in particular, which never appear in a failure block) is one command
 away.
 
     yarn jest --someArgs 2>&1 | jest_lens.py
-    jest_lens.py --logs last | grep 'special value'
+    jest_lens.py --console a3f19c
 
 The tool never runs Jest. Choosing the runner, the node version and the flags
 stays with the caller, who knows the repo.
@@ -86,13 +86,15 @@ def stored_runs() -> list[Path]:
     return sorted(CACHE_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def resolve(run_id: str | None) -> str:
-    """Map a run id, an unambiguous prefix, or `last`, to a stored run."""
+def resolve(run_id: str) -> str:
+    """Map a run id, or an unambiguous prefix of one, to a stored run.
+
+    There is deliberately no "most recent" alias: one store holds the runs from
+    every repo, so the newest is often from somewhere else entirely.
+    """
     runs = stored_runs()
     if not runs:
         sys.exit("jest-lens: no stored runs")
-    if run_id in (None, "last", "-1"):
-        return runs[0].stem
     if log_path(run_id).exists():
         return run_id
     matches = [p.stem for p in runs if p.stem.startswith(run_id)]
@@ -248,7 +250,8 @@ def crash_excerpt(log: Path) -> str:
 
 
 def report(run_id: str, parsed: Parsed, log: Path) -> tuple[int, str]:
-    hint = f"Recover: jest_lens.py --logs {run_id}   (also --failures, --console, --failed-paths)"
+    hint = (f"Recover: jest_lens.py --full-log {run_id}"
+            "   (also --all-failures, --console, --failed-paths)")
 
     if not parsed.summary:
         if parsed.no_tests:
@@ -311,7 +314,7 @@ def report(run_id: str, parsed: Parsed, log: Path) -> tuple[int, str]:
 
     omitted = len(parsed.blocks) - shown
     if omitted > 0:
-        print(f"[TRUNCATED: {omitted} further failure(s). Full blocks: jest_lens.py --failures {run_id}]")
+        print(f"[TRUNCATED: {omitted} more. All blocks: jest_lens.py --all-failures {run_id}]")
         print()
 
     for line in parsed.summary:
@@ -375,8 +378,8 @@ def list_runs() -> None:
                 pass
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
         size = path.stat().st_size // 1024
-        note = meta.get("label") or meta.get("cwd", "")
-        print(f"{path.stem}  {when}  {size:>6}K  {meta.get('result', '?'):<14} {note}")
+        print(f"{path.stem}  {when}  {size:>6}K  "
+              f"{meta.get('result', '?'):<14} {meta.get('cwd', '')}")
 
 
 # --- entry point ------------------------------------------------------------
@@ -385,36 +388,63 @@ def list_runs() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="jest_lens.py",
-        description="Summarise piped Jest output; recover the full log by run id.",
+        allow_abbrev=False,
+        description="Summarise piped Jest output; recover a stored run by id.",
         epilog="Jest reports to stderr, so pipe with 2>&1:  yarn jest 2>&1 | jest_lens.py",
     )
-    ap.add_argument("--logs", nargs="?", const="last", metavar="ID", help="print a stored run in full, passes included")
-    ap.add_argument("--failures", nargs="?", const="last", metavar="ID", help="print all failure blocks, ignoring the report cap")
-    ap.add_argument("--console", nargs="?", const="last", metavar="ID", help="print the console output, which no failure block carries")
-    ap.add_argument("--failed-paths", nargs="?", const="last", metavar="ID",
-                    help="print paths of failing suites, not test names")
-    ap.add_argument("--runs", action="store_true", help="list stored runs, newest first")
-    ap.add_argument("--label", metavar="TEXT", help="note stored with the run, shown by --runs")
+    ap.add_argument("run", nargs="?", metavar="ID",
+                    help="stored run to read, as printed by the run itself")
+    ap.add_argument("--all-failures", action="store_true",
+                    help="every failure block, ignoring the report cap")
+    ap.add_argument("--console", action="store_true",
+                    help="the console output, which no failure block carries")
+    ap.add_argument("--full-log", action="store_true",
+                    help="the entire stream, not only the sections above")
+    ap.add_argument("--failed-paths", action="store_true",
+                    help="file paths of failing suites, on one line")
+    ap.add_argument("--list-runs", action="store_true", help="list stored runs, newest first")
     args = ap.parse_args()
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if args.runs:
+    if args.list_runs:
         list_runs()
         return 0
-    for flag, action in (
-        (args.logs, lambda i: dump_logs(i)),
-        (args.failures, lambda i: dump_sections(i, want_console=False)),
-        (args.console, lambda i: dump_sections(i, want_console=True)),
-        (args.failed_paths, lambda i: dump_failed_paths(i)),
-    ):
-        if flag:
-            action(resolve(flag))
-            return 0
+
+    # --all-failures and --console are sections of one run and read well together.
+    # The other two are not: --full-log already contains both sections, and
+    # --failed-paths is consumed by a shell, so prose alongside it would break
+    # the caller.
+    sections = [n for n, on in (("--all-failures", args.all_failures),
+                                ("--console", args.console)) if on]
+    whole = [n for n, on in (("--full-log", args.full_log),
+                             ("--failed-paths", args.failed_paths)) if on]
+
+    if whole and (sections or len(whole) > 1):
+        ap.error(f"{whole[0]} cannot be combined with {(sections + whole[1:])[0]}")
+
+    if whole or sections:
+        if args.run is None:
+            ap.error(f"an ID is required with {(whole + sections)[0]}"
+                     " (--list-runs to find one)")
+        run_id = resolve(args.run)
+        if args.full_log:
+            dump_logs(run_id)
+        elif args.failed_paths:
+            dump_failed_paths(run_id)
+        else:
+            if args.all_failures:
+                dump_sections(run_id, want_console=False)
+            if args.console:
+                dump_sections(run_id, want_console=True)
+        return 0
 
     if sys.stdin.isatty():
         ap.print_help()
         return 2
+
+    if args.run is not None:
+        ap.error("an ID is only meaningful with an output flag")
 
     # One undecodable byte anywhere in a test's output would otherwise abort the
     # run and lose the report.
@@ -435,7 +465,7 @@ def main() -> int:
         except KeyboardInterrupt:
             # The partial log is already on disk and the id is already printed.
             print("\njest-lens: interrupted; partial log kept.", file=sys.stderr)
-            print(f"Recover: jest_lens.py --logs {run_id}")
+            print(f"Recover: jest_lens.py --full-log {run_id}")
             return 130
 
     code, result = report(run_id, parsed, log)
@@ -446,7 +476,6 @@ def main() -> int:
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 "result": result,
                 "counts": parsed.counts,
-                "label": args.label or "",
             }
         )
     )

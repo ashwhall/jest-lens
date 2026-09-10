@@ -20,13 +20,20 @@ FAIL  2 failed, 91 passed in 18.02 s
 
       at Object.<anonymous> (src/b.test.ts:22:19)
 
-$ python3 jest_lens.py --console   # console output; Jest omits it from failures
-$ python3 jest_lens.py --failures  # all failure blocks, ignoring the ~5KB cap
-$ python3 jest_lens.py --logs      # the whole run, passes included
-$ python3 jest_lens.py --failed-paths   # paths of failing suites, not test names
+$ python3 jest_lens.py --console a3f19c        # console output, absent above
+$ python3 jest_lens.py --all-failures a3f19c   # every block, ignoring the cap
+$ python3 jest_lens.py --full-log a3f19c       # the whole run, passes included
+$ python3 jest_lens.py --failed-paths a3f19c   # file paths of failing suites
 ```
 
-The id defaults to the last run. Stdlib-only Python, nothing to build.
+Every recovery flag needs the run id the run printed. There is no "most
+recent" alias, because one store holds the runs from every repo and the newest
+is often from another one. `--list-runs` finds an id you have lost.
+`--all-failures` and `--console` can be given together. `--full-log` is the
+entire stream rather than just those two sections, carrying the per-suite
+results, the summary, any coverage table and whatever the package manager
+printed, so it refuses to be combined. Stdlib-only Python, nothing to
+build.
 
 ## As a Claude Code plugin
 

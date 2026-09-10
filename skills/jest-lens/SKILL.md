@@ -35,15 +35,30 @@ stream could not be parsed. Jest's own exit code is lost to the pipe.
 ## Recovering what the report left out
 
 Jest keeps console output out of its failure blocks, so the report cannot show
-it, and failure blocks stop at a ~5KB cap. The stored log holds both. `last` is
-the default, so the id is usually unnecessary.
+it, and failure blocks stop at a ~5KB cap. The stored log holds both.
 
 ```bash
-<jl> --console            # console output, which no failure block carries
-<jl> --failures           # all failure blocks, ignoring the ~5KB cap
-<jl> --logs | grep 'foo'  # the whole run, passes included
-<jl> --failed-paths       # paths of failing suites, not test names
-<jl> --runs               # recent runs, newest first
+<jl> --console a3f19c               # console output, absent from failures
+<jl> --all-failures a3f19c          # every failure block, ignoring the ~5KB cap
+<jl> --full-log a3f19c | grep 'foo' # the whole run, passes included
+<jl> --failed-paths a3f19c          # file paths of failing suites, not test names
+<jl> --list-runs                    # recent runs, newest first
+```
+
+Each needs the id the run printed. There is no "most recent" alias: one store
+holds the runs from every repo, so the newest is often from another one, and it
+would look like a real answer. An unambiguous prefix of an id works, and
+`--list-runs` finds one you have lost.
+
+`--all-failures` and `--console` combine. `--full-log` is the entire stream,
+not just those two sections: it also carries the per-suite `PASS`/`FAIL` lines,
+the summary, any coverage table, any warning outside a `●` block, and whatever
+the package manager printed. Yarn 1 echoes the resolved Jest command there,
+which `npx` and `pnpm exec` do not. It refuses to be combined, as does `--failed-paths`, whose
+output is meant for a shell:
+
+```bash
+<jl> --all-failures --console a3f19c
 ```
 
 The stored log has ANSI escapes stripped and carriage-return overwrites
