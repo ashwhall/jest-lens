@@ -65,6 +65,11 @@ yours, because the repo's requirements are not derivable from its lockfile.
   whose exit code then reads as a test failure.
 - Never pass `--silent`. It suppresses the console output the log exists to keep.
 - Never pass `--watch`. Without a TTY it never terminates.
+- If a run dies inside watchman rather than in a test, pass `--watchman=false`.
+  Jest falls back to its own file crawler.
+- Where a repo collects coverage by default, `--coverage=false` is usually worth
+  it. The report drops the table anyway, and instrumentation dominates the run
+  time on a short one.
 
 If a run reports a pre-test error, read the `AMBIENT NODE:` line first. A wrong
 node major is the most common cause, and it crashes at module load.

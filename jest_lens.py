@@ -40,6 +40,9 @@ BULLET = re.compile(r"^\s*●\s*(.*)$")
 SUITE_LINE = re.compile(r"^(PASS|FAIL)\s+(\S.*?)(?:\s+\([\d.]+\s*m?s\))?$")
 COUNT = re.compile(r"(\d+)\s+(failed|passed|skipped|todo|pending)")
 NO_TESTS = re.compile(r"^No tests found")
+# A failure block runs to the next heading or the summary, but a coverage table
+# sits between the two and would otherwise be swallowed into the last block.
+BLOCK_END = re.compile(r"^-{5,}\|-|^={5,}$")
 # The first of these in a crash is usually the sentence worth reading. A blind
 # tail lands in a stack trace instead.
 ERROR_ANCHOR = re.compile(
@@ -199,6 +202,9 @@ def parse(lines) -> Parsed:
                         out.snapshots_failed += int(value)
             elif line.startswith("Time:"):
                 out.duration = line.split(":", 1)[1].strip()
+        elif block is not None and BLOCK_END.match(line):
+            out.blocks.append((title, block))
+            block = None
         elif block is not None and len(block) < BLOCK_MAX_LINES:
             if line.strip() or block:
                 block.append(line)
