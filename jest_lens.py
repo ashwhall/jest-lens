@@ -519,11 +519,16 @@ def baselines(run_id: str) -> dict | None:
     with log.open(errors="replace") as handle:
         parsed = parse(handle, echo=False, block_max_lines=None)
 
+    # The body alone is not readable: without the `●` heading and the FAIL line
+    # above it, a failure cannot be tied to a test or a suite. Counting only
+    # bodies would make the hand-read look cheaper than it can be.
     by_hand = 0
-    for _, body, is_console in parsed.blocks:
+    for title, body, is_console in parsed.blocks:
         if is_console:
             continue
-        by_hand += len(("\n".join(body) + "\n").encode("utf-8", "replace"))
+        by_hand += len((f"● {title}\n" + "\n".join(body) + "\n").encode("utf-8", "replace"))
+    for suite in dict.fromkeys(parsed.failed_suites):
+        by_hand += len((f"FAIL {suite}\n").encode("utf-8", "replace"))
     for line in parsed.summary:
         if line.startswith(("Test Suites:", "Tests:")):
             by_hand += len((line + "\n").encode("utf-8", "replace"))
@@ -558,6 +563,7 @@ def audit(run_id: str | None) -> int:
         measured = baselines(run_id)
         covered = 1 if measured else 0
         scope = ""
+        captured_note = "kept for recovery, never printed"
         counts = ", ".join(f"{n} {kind}" for kind, n in (meta.get("counts") or {}).items() if n)
         where = os.path.basename(meta.get("cwd", "")) or "?"
         heading = f"Run {run_id} — {where}" + (f", {counts}" if counts else "")
@@ -580,6 +586,8 @@ def audit(run_id: str | None) -> int:
             measured["missed"] += one["missed"]
             measured["failed_suites"] += one["failed_suites"]
         scope = "" if covered == total else f" ({covered} of {total} still stored)"
+        captured_note = ("all-time, including runs since pruned"
+                         if covered < total else "kept for recovery, never printed")
         heading = f"Lifetime — {total:,} runs tallied"
         label = "Runs"
 
@@ -596,8 +604,8 @@ def audit(run_id: str | None) -> int:
             verdict = f"complete, all {suites} failing {plural} named"
         else:
             verdict = "complete, nothing failed to miss"
-        rows.append((f"`tail -{TAIL_BASELINE}` instead", measured["tail"], verdict))
-    rows.append(("Stored on disk", stored, "kept for recovery, never printed"))
+        rows.append((f"`tail -{TAIL_BASELINE}` instead", measured["tail"], verdict + scope))
+    rows.append(("Captured", stored, captured_note))
 
     name = max(len(row[0]) for row in rows)
     width = max(max(len(f"{row[1]:,}") for row in rows), len("bytes"))
@@ -617,7 +625,7 @@ def audit(run_id: str | None) -> int:
     print("Token counts are estimated at four bytes per token.")
     print("Emitted counts everything jest-lens printed. A dump filtered through")
     print("grep, head or a pipe is counted whole, so the real cost may be lower.")
-    print("Stored bytes are not context saved: a log this size would have been")
+    print("Captured bytes are not context saved: a log this size would have been")
     if stored > SPILL_THRESHOLD:
         print("spilled to a file by the harness rather than read into the")
         print("conversation. The honest comparison is the two middle rows.")
