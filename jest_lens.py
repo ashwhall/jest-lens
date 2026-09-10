@@ -123,15 +123,15 @@ def write_json(path: Path, data: dict) -> None:
         json.dump(data, handle)
 
 
-def tally(run_id: str, emitted: int, raw_chars: int | None = None) -> None:
+def tally(run_id: str, emitted: int, raw_bytes: int | None = None) -> None:
     """Record what this invocation printed about a run, against the run and
-    against the lifetime totals. `raw_chars` is passed once, by the run itself;
+    against the lifetime totals. `raw_bytes` is passed once, by the run itself;
     a recovery call adds only to what has been emitted since.
 
     The totals outlive the run files, which prune() caps at KEEP_RUNS.
     """
     meta = read_json(meta_path(run_id))
-    if raw_chars is None and "emitted" not in meta:
+    if raw_bytes is None and "emitted" not in meta:
         # A run captured before the tally existed. Counting only from here
         # would credit it with a report it never printed, so recover that
         # first and let this call add to it.
@@ -139,27 +139,31 @@ def tally(run_id: str, emitted: int, raw_chars: int | None = None) -> None:
         meta["calls"] = 1
     meta["emitted"] = meta.get("emitted", 0) + emitted
     meta["calls"] = meta.get("calls", 0) + 1
-    if raw_chars is not None:
-        meta["raw_chars"] = raw_chars
+    if raw_bytes is not None:
+        meta["raw_bytes"] = raw_bytes
     write_json(meta_path(run_id), meta)
 
     totals = read_json(totals_path())
     totals["emitted"] = totals.get("emitted", 0) + emitted
-    if raw_chars is not None:
+    if raw_bytes is not None:
         totals["runs"] = totals.get("runs", 0) + 1
-        totals["raw_chars"] = totals.get("raw_chars", 0) + raw_chars
+        totals["raw_bytes"] = totals.get("raw_bytes", 0) + raw_bytes
     write_json(totals_path(), totals)
 
 
 class Counted(io.TextIOBase):
-    """Passes stdout through untouched while counting what crossed it."""
+    """Passes stdout through untouched while counting what crossed it.
+
+    Counts UTF-8 bytes, not codepoints: the raw side of the comparison is a
+    file size, and Jest's output is full of multibyte marks.
+    """
 
     def __init__(self, wrapped):
         self.wrapped = wrapped
-        self.chars = 0
+        self.written = 0
 
     def write(self, text: str) -> int:
-        self.chars += len(text)
+        self.written += len(text.encode("utf-8", "replace"))
         return self.wrapped.write(text)
 
     def flush(self) -> None:
@@ -491,27 +495,35 @@ def replay_emitted(run_id: str) -> int | None:
             report(run_id, parsed, log)
     except Exception:
         return None
-    return len(buffer.getvalue())
+    return len(buffer.getvalue().encode("utf-8", "replace"))
 
 
 def percentage(saved: int, raw: int) -> str:
-    """A saving short of the whole log never rounds up to 100%, which would
-    read as nothing emitted at all, and a small loss keeps its sign rather
-    than rounding to a negative zero."""
+    """A saving short of the whole log must not render as 100%, which would
+    read as nothing emitted at all, and a loss must not render as a zero.
+
+    Both are decided from the rendered string rather than the float, since it
+    is the rendering that misleads: precision widens until the digits say
+    something true, and a saving too close to whole to render is marked
+    approximate instead.
+    """
     if not raw:
         return "n/a"
     share = saved / raw * 100
-    if 0 < 100 - share < 0.05:
-        return ">99.9%"
-    if share and abs(share) < 0.05:
-        return f"{share:.2f}%"
-    return f"{share:.1f}%"
+    for places in (1, 2, 3):
+        text = f"{share:.{places}f}"
+        if float(text) == 100 and saved < raw:
+            continue
+        if float(text) == 0 and saved:
+            continue
+        return f"{text}%"
+    return ">99.9%" if saved > 0 else "<0.001%"
 
 
 def audit(run_id: str | None) -> int:
     if run_id:
         meta = read_json(meta_path(run_id))
-        raw = meta.get("raw_chars") or log_path(run_id).stat().st_size
+        raw = meta.get("raw_bytes") or log_path(run_id).stat().st_size
         emitted = meta.get("emitted")
         calls = meta.get("calls")
         reconstructed = emitted is None
@@ -525,7 +537,7 @@ def audit(run_id: str | None) -> int:
         totals = read_json(totals_path())
         if not totals.get("runs"):
             sys.exit("jest-lens: no runs tallied yet")
-        raw, emitted, calls = totals["raw_chars"], totals["emitted"], totals["runs"]
+        raw, emitted, calls = totals["raw_bytes"], totals["emitted"], totals["runs"]
         reconstructed = False
         label = "Total runs"
 
@@ -536,21 +548,21 @@ def audit(run_id: str | None) -> int:
         (label, f"{calls:,}", ""),
         ("Raw", f"{raw:,}", f"{raw // 4:,}"),
         ("Emitted", f"{emitted:,}", f"{emitted // 4:,}"),
-        ("Saved", f"{saved:,}", f"{int(saved / 4):,}"),
+        ("Saved", f"{saved:,}", f"{saved // 4:,}"),
     ]
     name = max(len(row[0]) for row in rows)
-    chars = max(max(len(row[1]) for row in rows), len("chars"))
+    width = max(max(len(row[1]) for row in rows), len("bytes"))
     tokens = max(max(len(row[2]) for row in rows), len("est tokens"))
 
-    print(f"{'':<{name}}   {'chars':>{chars}}  {'est tokens':>{tokens}}")
+    print(f"{'':<{name}}   {'bytes':>{width}}  {'est tokens':>{tokens}}")
     for index, (text, one, two) in enumerate(rows):
-        line = f"{text:<{name}} : {one:>{chars}}  {two:>{tokens}}"
+        line = f"{text:<{name}} : {one:>{width}}  {two:>{tokens}}"
         if text == "Saved":
             line += f"  ({percentage(saved, raw)})"
         print(line.rstrip())
 
     print()
-    print("Token counts are estimated at four characters per token.")
+    print("Token counts are estimated at four bytes per token.")
     print("Emitted counts everything jest-lens printed. A dump filtered through")
     print("grep, head or a pipe is counted whole, so the real cost may be lower.")
     if reconstructed:
@@ -644,7 +656,7 @@ def main() -> int:
                     dump_sections(run_id, want_console=False)
                 if args.console:
                     dump_sections(run_id, want_console=True)
-        tally(run_id, counter.chars)
+        tally(run_id, counter.written)
         return 0
 
     if sys.stdin.isatty():
@@ -690,7 +702,7 @@ def main() -> int:
             "counts": parsed.counts,
         },
     )
-    tally(run_id, counter.chars, raw_chars=log.stat().st_size)
+    tally(run_id, counter.written, raw_bytes=log.stat().st_size)
     prune()
     return code
 
