@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "jest-lens",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Summarise a Jest run to a short report and keep the full log recoverable by run id.",
   "author": {
     "name": "Ash Hall",

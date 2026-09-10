@@ -16,6 +16,7 @@ stays with the caller, who knows the repo.
 """
 
 import argparse
+import collections
 import contextlib
 import io
 import json
@@ -35,6 +36,12 @@ KEEP_RUNS = 20
 BLOCK_MAX_LINES = 60
 REPORT_MAX_BYTES = 5000
 TAIL_LINES = 40
+# The habitual manual filter, and the `--audit` baseline it stands for.
+TAIL_BASELINE = 25
+# Above roughly this, the harness stores a command's output and shows a short
+# preview instead of the whole thing, so the log was never going to be read
+# into the conversation. Measured, not documented, so treat it as approximate.
+SPILL_THRESHOLD = 25_000
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
 SUMMARY = re.compile(r"^(Test Suites|Tests|Snapshots|Time|Ran all test suites)\b")
@@ -498,32 +505,46 @@ def replay_emitted(run_id: str) -> int | None:
     return len(buffer.getvalue().encode("utf-8", "replace"))
 
 
-def percentage(saved: int, raw: int) -> str:
-    """A saving short of the whole log must not render as 100%, which would
-    read as nothing emitted at all, and a loss must not render as a zero.
+def baselines(run_id: str) -> dict | None:
+    """What the report's information costs by other means, measured from the log.
 
-    Both are decided from the rendered string rather than the float, since it
-    is the rendering that misleads: precision widens until the digits say
-    something true, and a saving too close to whole to render is marked
-    approximate instead.
+    Three figures, all read off the same stored run, so they are comparable:
+    what jest-lens printed, what the same facts occupy in the raw log, and what
+    the habitual `tail` would have shown. The last carries a verdict, because a
+    tail that is cheaper but misses failures is not the same information.
     """
-    if not raw:
-        return "n/a"
-    share = saved / raw * 100
-    for places in (1, 2, 3):
-        text = f"{share:.{places}f}"
-        if float(text) == 100 and saved < raw:
+    log = log_path(run_id)
+    if not log.exists():
+        return None
+    with log.open(errors="replace") as handle:
+        parsed = parse(handle, echo=False, block_max_lines=None)
+
+    by_hand = 0
+    for _, body, is_console in parsed.blocks:
+        if is_console:
             continue
-        if float(text) == 0 and saved:
-            continue
-        return f"{text}%"
-    return ">99.9%" if saved > 0 else "<0.001%"
+        by_hand += len(("\n".join(body) + "\n").encode("utf-8", "replace"))
+    for line in parsed.summary:
+        if line.startswith(("Test Suites:", "Tests:")):
+            by_hand += len((line + "\n").encode("utf-8", "replace"))
+
+    with log.open(errors="replace") as handle:
+        tail = collections.deque(handle, maxlen=TAIL_BASELINE)
+    tail_text = "".join(tail)
+    missed = [suite for suite in dict.fromkeys(parsed.failed_suites)
+              if suite not in tail_text]
+    return {
+        "by_hand": by_hand,
+        "tail": len(tail_text.encode("utf-8", "replace")),
+        "missed": missed,
+        "failed_suites": len(dict.fromkeys(parsed.failed_suites)),
+    }
 
 
 def audit(run_id: str | None) -> int:
     if run_id:
         meta = read_json(meta_path(run_id))
-        raw = meta.get("raw_bytes") or log_path(run_id).stat().st_size
+        stored = meta.get("raw_bytes") or log_path(run_id).stat().st_size
         emitted = meta.get("emitted")
         calls = meta.get("calls")
         reconstructed = emitted is None
@@ -532,39 +553,77 @@ def audit(run_id: str | None) -> int:
             calls = 1
         if emitted is None:
             sys.exit(f"jest-lens: cannot audit `{run_id}`")
-        label = "Total calls"
+        if not stored:
+            sys.exit(f"jest-lens: `{run_id}` stored no output to audit")
+        measured = baselines(run_id)
+        covered = 1 if measured else 0
+        scope = ""
+        counts = ", ".join(f"{n} {kind}" for kind, n in (meta.get("counts") or {}).items() if n)
+        where = os.path.basename(meta.get("cwd", "")) or "?"
+        heading = f"Run {run_id} — {where}" + (f", {counts}" if counts else "")
+        label, total = "Calls", calls
     else:
         totals = read_json(totals_path())
         if not totals.get("runs"):
             sys.exit("jest-lens: no runs tallied yet")
-        raw, emitted, calls = totals["raw_bytes"], totals["emitted"], totals["runs"]
+        stored, emitted, total = totals["raw_bytes"], totals["emitted"], totals["runs"]
         reconstructed = False
-        label = "Total runs"
+        measured = {"by_hand": 0, "tail": 0, "missed": [], "failed_suites": 0}
+        covered = 0
+        for path in stored_runs():
+            one = baselines(path.stem)
+            if not one:
+                continue
+            covered += 1
+            measured["by_hand"] += one["by_hand"]
+            measured["tail"] += one["tail"]
+            measured["missed"] += one["missed"]
+            measured["failed_suites"] += one["failed_suites"]
+        scope = "" if covered == total else f" ({covered} of {total} still stored)"
+        heading = f"Lifetime — {total:,} runs tallied"
+        label = "Runs"
 
-    saved = raw - emitted
-    if not raw:
-        sys.exit(f"jest-lens: `{run_id}` stored no output to audit")
-    rows = [
-        (label, f"{calls:,}", ""),
-        ("Raw", f"{raw:,}", f"{raw // 4:,}"),
-        ("Emitted", f"{emitted:,}", f"{emitted // 4:,}"),
-        ("Saved", f"{saved:,}", f"{saved // 4:,}"),
-    ]
+    rows = [(label, total, None),
+            ("Emitted", emitted, "what jest-lens printed")]
+    if covered:
+        rows.append(("Same facts by hand", measured["by_hand"],
+                     f"failure blocks + counts, uncompressed{scope}"))
+        suites = measured["failed_suites"]
+        plural = "suite" if suites == 1 else "suites"
+        if measured["missed"]:
+            verdict = f"misses {len(measured['missed'])} of {suites} failing {plural}"
+        elif suites:
+            verdict = f"complete, all {suites} failing {plural} named"
+        else:
+            verdict = "complete, nothing failed to miss"
+        rows.append((f"`tail -{TAIL_BASELINE}` instead", measured["tail"], verdict))
+    rows.append(("Stored on disk", stored, "kept for recovery, never printed"))
+
     name = max(len(row[0]) for row in rows)
-    width = max(max(len(row[1]) for row in rows), len("bytes"))
-    tokens = max(max(len(row[2]) for row in rows), len("est tokens"))
+    width = max(max(len(f"{row[1]:,}") for row in rows), len("bytes"))
+    tokens = max(max(len(f"{row[1] // 4:,}") for row in rows), len("est tokens"))
 
+    print(heading)
+    print()
     print(f"{'':<{name}}   {'bytes':>{width}}  {'est tokens':>{tokens}}")
-    for index, (text, one, two) in enumerate(rows):
-        line = f"{text:<{name}} : {one:>{width}}  {two:>{tokens}}"
-        if text == "Saved":
-            line += f"  ({percentage(saved, raw)})"
+    for text, value, note in rows:
+        line = f"{text:<{name}} : {value:>{width},}  "
+        line += "" if text == label else f"{value // 4:>{tokens},}"
+        if note:
+            line = f"{line:<{name + width + tokens + 6}}  {note}"
         print(line.rstrip())
 
     print()
     print("Token counts are estimated at four bytes per token.")
     print("Emitted counts everything jest-lens printed. A dump filtered through")
     print("grep, head or a pipe is counted whole, so the real cost may be lower.")
+    print("Stored bytes are not context saved: a log this size would have been")
+    if stored > SPILL_THRESHOLD:
+        print("spilled to a file by the harness rather than read into the")
+        print("conversation. The honest comparison is the two middle rows.")
+    else:
+        print("read whole, but nobody reads a log to learn a test count. The")
+        print("honest comparison is the two middle rows, not the log.")
     if reconstructed:
         print("This run predates the tally: emitted is reconstructed from its log,")
         print("and covers the report only, not any recovery call made since.")

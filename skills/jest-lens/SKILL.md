@@ -31,7 +31,7 @@ printed is answered by reading it, not by running the suite again.
 <jl> --full-log a3f19c       # the entire stream, greppable
 <jl> --failed-paths a3f19c   # file paths of failing suites, not test names
 <jl> --list-runs             # stored runs, newest first
-<jl> --audit a3f19c          # what that run cost against its raw log
+<jl> --audit a3f19c          # that run's cost vs. reading the log by hand
 ```
 
 Each needs the id the run printed, except `--list-runs` and a bare `--audit`,
@@ -39,8 +39,9 @@ which reports the lifetime totals instead. An unambiguous prefix works, and
 `--list-runs` finds a lost one. Only `--all-failures` and `--console` combine.
 
 Every recovery call is added to its run's cost, so `--audit` after several of
-them can show a loss: reading the whole log back costs more than never having
-summarised it.
+them can show the report costing more than a hand-read of the same facts. That
+is the honest comparison and it is meant to be visible: the saving is against
+`tail`, which is cheap but drops failures, not against the whole log.
 
 Re-running failures covers whole files, so their passing tests run again. There
 is no `-t` equivalent.
