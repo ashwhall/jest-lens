@@ -1,22 +1,21 @@
 ---
 name: jest-lens
-description: Run Jest and get a short report instead of tens of thousands of lines. Use for ANY request to run tests, run jest, check tests, verify a suite, re-run a failing test, or ask what the tests printed. Also use after editing code, before a commit, or before a PR. Pipe Jest's output through jl; the full log stays recoverable by run id, so console.log output and truncated failures are one command away.
+description: Run Jest and get a short report instead of tens of thousands of lines. Use for ANY request to run tests, run jest, check tests, verify a suite, re-run a failing test, or ask what the tests printed. Also use after editing code, before a commit, or before a PR. Pipe Jest's output through jest_lens.py; the full log stays recoverable by run id, so console.log output and truncated failures are one command away.
 ---
 
 # jest-lens
 
-Run Jest however the repo needs, and pipe its output through `jl`.
+Run Jest however the repo needs, and pipe its output through `jest_lens.py`,
+which sits beside this file. Invoke it by absolute path. Examples below write
+`<jl>` for `python3 /that/path/jest_lens.py`.
 
 ```bash
-yarn jest path/to/thing.test.ts 2>&1 | jl
+yarn jest path/to/thing.test.ts 2>&1 | <jl>
 ```
 
-If `jl` is not on PATH, run `install.sh` from this skill's own directory once.
-It symlinks the command and needs no dependencies.
-
 **The `2>&1` is not optional.** Jest reports to stderr, so without it the pipe
-gets the package manager's banner and nothing else. `jl` will tell you when it
-sees that, but only after wasting a run.
+gets the package manager's banner and nothing else. The tool will tell you when
+it sees that, but only after wasting a run.
 
 Output is the counts, the failure blocks capped at ~5KB, and a run id:
 
@@ -37,31 +36,31 @@ The report never contains console output, and it truncates past ~5KB. Both are
 in the stored log. `last` is the default, so the id is usually unnecessary.
 
 ```bash
-jl --console            # console.log output Jest captured
-jl --failures           # every failure block, untruncated
-jl --logs | grep 'foo'  # the raw output, for anything else
-jl --failed-paths       # failing suite paths, to compose a rerun
-jl --runs               # recent runs, newest first
+<jl> --console            # console.log output Jest captured
+<jl> --failures           # every failure block, untruncated
+<jl> --logs | grep 'foo'  # the raw output, for anything else
+<jl> --failed-paths       # failing suite paths, to compose a rerun
+<jl> --runs               # recent runs, newest first
 ```
 
 Re-run only what broke:
 
 ```bash
-yarn jest $(jl --failed-paths) 2>&1 | jl
+yarn jest $(<jl> --failed-paths) 2>&1 | <jl>
 ```
 
 Logs live in `~/.cache/jest-lens/`, pruned to the last 20 runs.
 
 ## Choosing the command
 
-`jl` never runs Jest. Picking the runner, the node version and the flags is
-yours, because the repo's requirements are not derivable from its lockfile.
+This tool never runs Jest. Picking the runner, the node version and the flags
+is yours, because the repo's requirements are not derivable from its lockfile.
 
 - Runner: `yarn jest`, `pnpm jest`, `pnpm nx test <project>`, or `npx jest`.
 - Node: repos pin incompatible majors. Where a `.nvmrc` or `.node-version`
   exists, run `fnm use` first; it persists across later commands.
 - To inherit the repo's own tuned Jest flags, pipe its script instead:
-  `yarn test 2>&1 | jl`. Watch for a `test` script that also runs a linter,
+  `yarn test 2>&1 | <jl>`. Watch for a `test` script that also runs a linter,
   whose exit code then reads as a test failure.
 - Never pass `--silent`. It suppresses the console output the log exists to keep.
 - Never pass `--watch`. Without a TTY it never terminates.
