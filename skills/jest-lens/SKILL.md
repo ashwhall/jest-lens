@@ -9,11 +9,10 @@ Pipe Jest's output through this plugin's `jest_lens.py`. The `2>&1` is
 required, because Jest reports to stderr.
 
 ```bash
-yarn jest path/to/thing.test.ts 2>&1 | python3 "$CLAUDE_PLUGIN_ROOT/jest_lens.py"
+yarn jest path/to/thing.test.ts 2>&1 | python3 "${CLAUDE_PLUGIN_ROOT}/jest_lens.py"
 ```
 
-If `CLAUDE_PLUGIN_ROOT` is unset, use the absolute path of `jest_lens.py` at
-this plugin's root. Below, `<jl>` stands for whichever applies.
+Below, `<jl>` stands for that same `python3` invocation.
 
 You get the counts, the failure blocks up to a ~5KB cap, and a run id. Exit
 status is 0 on a pass, 1 on failures or a pre-test error, 2 on an unparseable
