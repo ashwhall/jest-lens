@@ -43,4 +43,4 @@ $ claude plugin install jest-lens@jest-lens
 ```
 
 The skill then fires on any request to run tests, and invokes the script from
-`$CLAUDE_PLUGIN_ROOT`. It costs ~80 tokens always-on and ~560 when it fires.
+`${CLAUDE_PLUGIN_ROOT}`. It costs ~80 tokens always-on and ~560 when it fires.
