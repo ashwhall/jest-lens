@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "jest-lens",
+  "description": "Leaner Jest runs: a short report instead of tens of thousands of lines.",
+  "owner": {
+    "name": "Ash Hall",
+    "email": "ashwhall@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "jest-lens",
+      "source": "./",
+      "description": "Summarise a Jest run to a short report and keep the full log recoverable by run id."
+    }
+  ]
+}
