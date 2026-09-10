@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "jest-lens",
+  "version": "0.1.0",
+  "description": "Summarise a Jest run to a short report and keep the full log recoverable by run id.",
+  "author": {
+    "name": "Ash Hall",
+    "email": "ashwhall@gmail.com"
+  },
+  "homepage": "https://github.com/ashwhall/jest-lens",
+  "license": "MIT",
+  "keywords": [
+    "jest",
+    "testing",
+    "context"
+  ]
+}
