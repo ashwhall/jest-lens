@@ -31,10 +31,16 @@ printed is answered by reading it, not by running the suite again.
 <jl> --full-log a3f19c       # the entire stream, greppable
 <jl> --failed-paths a3f19c   # file paths of failing suites, not test names
 <jl> --list-runs             # stored runs, newest first
+<jl> --audit a3f19c          # what that run cost against its raw log
 ```
 
-Each needs the id the run printed. An unambiguous prefix works, and
+Each needs the id the run printed, except `--list-runs` and a bare `--audit`,
+which reports the lifetime totals instead. An unambiguous prefix works, and
 `--list-runs` finds a lost one. Only `--all-failures` and `--console` combine.
+
+Every recovery call is added to its run's cost, so `--audit` after several of
+them can show a loss: reading the whole log back costs more than never having
+summarised it.
 
 Re-running failures covers whole files, so their passing tests run again. There
 is no `-t` equivalent.
