@@ -34,18 +34,23 @@ stream could not be parsed. Jest's own exit code is lost to the pipe.
 
 ## Recovering what the report left out
 
-The report never contains console output, and it truncates past ~5KB. Both are
-in the stored log. `last` is the default, so the id is usually unnecessary.
+Jest keeps console output out of its failure blocks, so the report cannot show
+it, and failure blocks stop at a ~5KB cap. The stored log holds both. `last` is
+the default, so the id is usually unnecessary.
 
 ```bash
-<jl> --console            # console.log output Jest captured
-<jl> --failures           # every failure block, untruncated
-<jl> --logs | grep 'foo'  # the raw output, for anything else
-<jl> --failed-paths       # failing suite paths, to compose a rerun
+<jl> --console            # console output, which no failure block carries
+<jl> --failures           # all failure blocks, ignoring the ~5KB cap
+<jl> --logs | grep 'foo'  # the whole run, passes included
+<jl> --failed-paths       # paths of failing suites, not test names
 <jl> --runs               # recent runs, newest first
 ```
 
-Re-run only what broke:
+The stored log has ANSI escapes stripped and carriage-return overwrites
+resolved, so `grep` matches plainly.
+
+Re-run the suites that broke. This is whole files, so it re-runs their passing
+tests too; there is no `-t` equivalent.
 
 ```bash
 yarn jest $(<jl> --failed-paths) 2>&1 | <jl>

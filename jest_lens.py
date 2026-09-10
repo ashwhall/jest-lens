@@ -349,7 +349,11 @@ def dump_sections(run_id: str, want_console: bool) -> None:
 
 
 def dump_failed_paths(run_id: str) -> None:
-    """Print the failing suite paths, ready to paste back into a Jest command."""
+    """Print the paths of suites that failed, space separated.
+
+    Suite files, not test names: re-running these covers their passing tests
+    too, and nothing here feeds Jest's `-t`.
+    """
     paths = []
     for line in log_path(run_id).read_text(errors="replace").splitlines():
         suite = SUITE_LINE.match(line)
@@ -384,11 +388,11 @@ def main() -> int:
         description="Summarise piped Jest output; recover the full log by run id.",
         epilog="Jest reports to stderr, so pipe with 2>&1:  yarn jest 2>&1 | jest_lens.py",
     )
-    ap.add_argument("--logs", nargs="?", const="last", metavar="ID", help="print a stored run's full output")
-    ap.add_argument("--failures", nargs="?", const="last", metavar="ID", help="print every failure block, untruncated")
-    ap.add_argument("--console", nargs="?", const="last", metavar="ID", help="print the console output Jest captured")
+    ap.add_argument("--logs", nargs="?", const="last", metavar="ID", help="print a stored run in full, passes included")
+    ap.add_argument("--failures", nargs="?", const="last", metavar="ID", help="print all failure blocks, ignoring the report cap")
+    ap.add_argument("--console", nargs="?", const="last", metavar="ID", help="print the console output, which no failure block carries")
     ap.add_argument("--failed-paths", nargs="?", const="last", metavar="ID",
-                    help="print the failing suite paths, for pasting into a rerun")
+                    help="print paths of failing suites, not test names")
     ap.add_argument("--runs", action="store_true", help="list stored runs, newest first")
     ap.add_argument("--label", metavar="TEXT", help="note stored with the run, shown by --runs")
     args = ap.parse_args()

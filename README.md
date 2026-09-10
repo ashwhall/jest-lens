@@ -1,10 +1,11 @@
 # jest-lens
 
 Jest prints tens of thousands of lines to say "93 passed". Pipe it through
-`jest_lens.py` and you get the counts plus the failure blocks, while the full
-output is stored under a short run id so nothing is lost. Written for driving
-Jest from an LLM agent, where that output competes with the code for a context
-budget.
+`jest_lens.py` and you get the counts, plus the failure blocks up to a ~5KB
+cap. The whole output is stored under a short run id, so the cap and the
+console output Jest keeps out of its failure blocks are both one command away.
+Written for driving Jest from an LLM agent, where that output competes with the
+code for a context budget.
 
 `2>&1` is required, because Jest reports to stderr.
 
@@ -19,10 +20,10 @@ FAIL  2 failed, 91 passed in 18.02 s
 
       at Object.<anonymous> (src/b.test.ts:22:19)
 
-$ python3 jest_lens.py --console      # console.log output, absent from failures
-$ python3 jest_lens.py --failures     # every failure block, untruncated
-$ python3 jest_lens.py --logs | grep 'foo'   # the raw output
-$ python3 jest_lens.py --failed-paths # failing suite paths, to compose a rerun
+$ python3 jest_lens.py --console   # console output; Jest omits it from failures
+$ python3 jest_lens.py --failures  # all failure blocks, ignoring the ~5KB cap
+$ python3 jest_lens.py --logs      # the whole run, passes included
+$ python3 jest_lens.py --failed-paths   # paths of failing suites, not test names
 ```
 
 The id defaults to the last run. Stdlib-only Python, nothing to build.
