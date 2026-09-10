@@ -27,7 +27,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import textwrap
 import time
 from pathlib import Path
 
@@ -37,12 +36,10 @@ KEEP_RUNS = 20
 BLOCK_MAX_LINES = 60
 REPORT_MAX_BYTES = 5000
 TAIL_LINES = 40
-# The habitual manual filter, and the `--audit` baseline it stands for.
-TAIL_BASELINE = 25
-# Above roughly this, the harness stores a command's output and shows a short
-# preview instead of the whole thing, so the log was never going to be read
-# into the conversation. Measured, not documented, so treat it as approximate.
-SPILL_THRESHOLD = 25_000
+# The manual filter the audit prices against: the most common `tail -N` in
+# practice, and the one the expensive runs used, where a wrapped failure block
+# makes forty lines cost tens of kilobytes.
+TAIL_BASELINE = 40
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]")
 SUMMARY = re.compile(r"^(Test Suites|Tests|Snapshots|Time|Ran all test suites)\b")
@@ -506,49 +503,14 @@ def replay_emitted(run_id: str) -> int | None:
     return len(buffer.getvalue().encode("utf-8", "replace"))
 
 
-def baselines(run_id: str) -> dict | None:
-    """What the report's information costs by other means, measured from the log.
-
-    Three figures, all read off the same stored run, so they are comparable:
-    what jest-lens printed, what the same facts occupy in the raw log, and what
-    the habitual `tail` would have shown. The last carries a verdict, because a
-    tail that is cheaper but misses failures is not the same information.
-    """
+def tail_bytes(run_id: str) -> int:
+    """The last `TAIL_BASELINE` lines of a stored log, as a byte count."""
     log = log_path(run_id)
     if not log.exists():
-        return None
+        return 0
     with log.open(errors="replace") as handle:
-        parsed = parse(handle, echo=False, block_max_lines=None)
-
-    # The body alone is not readable: without the `●` heading and the FAIL line
-    # above it, a failure cannot be tied to a test or a suite. Counting only
-    # bodies would make the hand-read look cheaper than it can be.
-    by_hand = 0
-    for title, body, is_console in parsed.blocks:
-        if is_console:
-            continue
-        by_hand += len((f"● {title}\n" + "\n".join(body) + "\n").encode("utf-8", "replace"))
-    for suite in dict.fromkeys(parsed.failed_suites):
-        by_hand += len((f"FAIL {suite}\n").encode("utf-8", "replace"))
-    for line in parsed.summary:
-        if line.startswith(("Test Suites:", "Tests:")):
-            by_hand += len((line + "\n").encode("utf-8", "replace"))
-
-    with log.open(errors="replace") as handle:
-        tail = collections.deque(handle, maxlen=TAIL_BASELINE)
-    tail_text = "".join(tail)
-    missed = [suite for suite in dict.fromkeys(parsed.failed_suites)
-              if suite not in tail_text]
-    # A pre-test error has no summary and no failure blocks: the crash text is
-    # the whole report, and there is no structure in the log to price it
-    # against. Reporting zero would read as the same facts costing nothing.
-    return {
-        "measurable": bool(parsed.summary or parsed.blocks),
-        "by_hand": by_hand,
-        "tail": len(tail_text.encode("utf-8", "replace")),
-        "missed": missed,
-        "failed_suites": len(dict.fromkeys(parsed.failed_suites)),
-    }
+        return len("".join(collections.deque(handle, maxlen=TAIL_BASELINE))
+                   .encode("utf-8", "replace"))
 
 
 def audit(run_id: str | None) -> int:
@@ -556,122 +518,62 @@ def audit(run_id: str | None) -> int:
         meta = read_json(meta_path(run_id))
         stored = meta.get("raw_bytes") or log_path(run_id).stat().st_size
         emitted = meta.get("emitted")
-        calls = meta.get("calls")
         reconstructed = emitted is None
         if reconstructed:
             emitted = replay_emitted(run_id)
-            calls = 1
         if emitted is None:
             sys.exit(f"jest-lens: cannot audit `{run_id}`")
         if not stored:
             sys.exit(f"jest-lens: `{run_id}` stored no output to audit")
-        measured = baselines(run_id)
-        covered = 1 if measured else 0
-        unmeasurable = 0
-        captured_note = "kept for recovery, never printed"
+        tail = tail_bytes(run_id)
         counts = ", ".join(f"{n} {kind}" for kind, n in (meta.get("counts") or {}).items() if n)
         where = os.path.basename(meta.get("cwd", "")) or "?"
         heading = f"Run {run_id} — {where}" + (f", {counts}" if counts else "")
-        label, total = "Calls", calls
     else:
-        totals = read_json(totals_path())
-        if not totals.get("runs"):
-            sys.exit("jest-lens: no runs tallied yet")
-        stored, emitted, total = totals["raw_bytes"], totals["emitted"], totals["runs"]
-        reconstructed = False
-        measured = {"by_hand": 0, "tail": 0, "missed": [], "failed_suites": 0}
-        covered = unmeasurable = 0
+        stored = emitted = tail = runs = 0
         for path in stored_runs():
-            one = baselines(path.stem)
-            if not one:
-                continue
-            covered += 1
-            if not one["measurable"]:
-                unmeasurable += 1
-            measured["by_hand"] += one["by_hand"]
-            measured["tail"] += one["tail"]
-            measured["missed"] += one["missed"]
-            measured["failed_suites"] += one["failed_suites"]
-        captured_note = ("all-time, including runs since pruned"
-                         if covered < total else "kept for recovery, never printed")
-        heading = f"Lifetime — {total:,} runs"
-        label = "Runs"
+            meta = read_json(meta_path(path.stem))
+            run_emitted = meta.get("emitted")
+            if run_emitted is None:
+                run_emitted = replay_emitted(path.stem) or 0
+            runs += 1
+            emitted += run_emitted
+            stored += meta.get("raw_bytes") or path.stat().st_size
+            tail += tail_bytes(path.stem)
+        if not runs:
+            sys.exit("jest-lens: no stored runs to audit")
+        reconstructed = False
+        heading = f"Last {runs} run" + ("" if runs == 1 else "s")
 
-    print(headline(heading, emitted, measured if covered else None))
-    print()
-
-    rows = [("Emitted", emitted, "what jest-lens printed")]
-    if covered:
-        rows.append((f"`tail -{TAIL_BASELINE}`", measured["tail"],
-                     "what you would have typed instead"))
-        if measured.get("measurable", True):
-            rows.append(("Minimum", measured["by_hand"],
-                         "the same failures and counts, straight from the log"))
-        else:
-            rows.append(("Minimum", None, "n/a — a pre-test error has neither"))
-    rows.append(("Captured", stored, "on disk, never in context"))
-
+    rows = [("Emitted", emitted), (f"tail -{TAIL_BASELINE}", tail), ("Log", stored)]
     name = max(len(row[0]) for row in rows)
-    sized = [row for row in rows if row[1] is not None]
-    width = max(max(len(f"{row[1]:,}") for row in sized), len("bytes"))
-    tokens = max(max(len(f"{row[1] // 4:,}") for row in sized), len("est tokens"))
+    width = max(max(len(f"{row[1]:,}") for row in rows), len("bytes"))
+    head = "est tokens"
+    tokens = max(max(len(f"{row[1] // 4:,}") for row in rows), len(head))
 
-    print(f"{'':<{name}}   {'bytes':>{width}}  {'est tokens':>{tokens}}   what it is")
-    for text, value, note in rows:
-        if value is None:
-            line = f"{text:<{name}} : {'—':>{width}}  {'':>{tokens}}"
-        else:
-            line = f"{text:<{name}} : {value:>{width},}  {value // 4:>{tokens},}"
-        print(f"{line}   {note}".rstrip())
+    print(heading)
+    print()
+    ratios = ["—" if text == "Emitted" else
+              (f"{value / emitted:.2f}×" if emitted else "n/a")
+              for text, value in rows]
+    versus = max(max(len(r) for r in ratios), len("vs emitted"))
+
+    print(f"{'':<{name}}   {'bytes':>{width}}  {head:>{tokens}}  {'vs emitted':>{versus}}")
+    for (text, value), ratio in zip(rows, ratios):
+        print(f"{text:<{name}} : {value:>{width},}  {value // 4:>{tokens},}  {ratio:>{versus}}")
 
     print()
-    caveats = []
-    if covered and covered < total:
-        caveats.append(f"the middle two rows cover only the {covered} of {total} "
-                       f"runs whose logs are still stored")
-    if covered and unmeasurable:
-        caveats.append(f"{unmeasurable} of those were pre-test errors, which have "
-                       f"no failure blocks to price, so they are excluded from Minimum")
-    if stored > SPILL_THRESHOLD:
-        caveats.append("captured bytes never reached the conversation: output that "
-                       "large is spilled to a file by the harness")
-    if reconstructed:
-        caveats.append("emitted is reconstructed from the log; it predates the tally "
-                       "and covers the report only")
-    caveats.append("tokens estimated at four bytes each")
-    for caveat in caveats:
-        print(textwrap.fill(caveat, width=78, initial_indent="- ",
-                            subsequent_indent="  "))
-    return 0
-
-
-def headline(heading: str, emitted: int, measured: dict | None) -> str:
-    """The one line to read: cost against the alternative, and what it bought.
-
-    Against `tail`, because that is what a person reaches for instead — not
-    against the stored log, which nobody reads. Cheaper is worth saying; dearer
-    is worth saying too, since completeness is the thing being bought.
-    """
-    if not measured:
-        return heading
-    tail = measured["tail"]
-    if not tail:
-        return heading
-    share = abs(emitted - tail) / tail * 100
-    cost = (f"{share:.0f}% cheaper than" if emitted <= tail
-            else f"{share:.0f}% dearer than")
-    suites, missed = measured["failed_suites"], len(measured["missed"])
-    if missed:
-        bought = f"which would have missed {missed} of {suites} failing suites"
-    elif suites == 1:
-        bought = "and named the one failing suite"
-    elif suites:
-        bought = f"and named all {suites} failing suites"
-    elif not measured.get("measurable", True):
-        bought = "on a run that crashed before the first test"
+    delta = tail - emitted
+    share = abs(delta) / tail * 100 if tail else 0
+    if delta >= 0:
+        print(f"Saved vs tail -{TAIL_BASELINE}: {abs(delta):,} bytes ({share:.0f}%)")
     else:
-        bought = "on runs where nothing failed"
-    return f"{heading}\n{cost} `tail -{TAIL_BASELINE}`, {bought}"
+        print(f"Cost vs tail -{TAIL_BASELINE}: {abs(delta):,} bytes more ({share:.0f}%)")
+    print("Tokens estimated at four bytes each.")
+    if reconstructed:
+        print(f"Emitted is reconstructed from this run's log; recovery calls are "
+              f"not counted.")
+    return 0
 
 
 def list_runs() -> None:
