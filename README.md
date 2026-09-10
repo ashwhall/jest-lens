@@ -42,5 +42,8 @@ $ claude plugin marketplace add ashwhall/jest-lens
 $ claude plugin install jest-lens@jest-lens
 ```
 
+`--audit` reports what a run cost against reading its raw log, or the lifetime
+totals when given no id.
+
 The skill then fires on any request to run tests, and invokes the script from
 `${CLAUDE_PLUGIN_ROOT}`. It costs ~80 tokens always-on and ~560 when it fires.

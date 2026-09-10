@@ -16,6 +16,8 @@ stays with the caller, who knows the repo.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -101,6 +103,80 @@ def log_path(run_id: str) -> Path:
 
 def meta_path(run_id: str) -> Path:
     return CACHE_DIR / f"{run_id}.json"
+
+
+def totals_path() -> Path:
+    return CACHE_DIR / "totals.json"
+
+
+def read_json(path: Path) -> dict:
+    """A missing or damaged file reads as absent, never as an error: the tally
+    is bookkeeping, and losing it must not cost the caller their run."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_json(path: Path, data: dict) -> None:
+    with open_private(path) as handle:
+        json.dump(data, handle)
+
+
+def tally(run_id: str, emitted: int, raw_chars: int | None = None) -> None:
+    """Record what this invocation printed about a run, against the run and
+    against the lifetime totals. `raw_chars` is passed once, by the run itself;
+    a recovery call adds only to what has been emitted since.
+
+    The totals outlive the run files, which prune() caps at KEEP_RUNS.
+    """
+    meta = read_json(meta_path(run_id))
+    if raw_chars is None and "emitted" not in meta:
+        # A run captured before the tally existed. Counting only from here
+        # would credit it with a report it never printed, so recover that
+        # first and let this call add to it.
+        meta["emitted"] = replay_emitted(run_id) or 0
+        meta["calls"] = 1
+    meta["emitted"] = meta.get("emitted", 0) + emitted
+    meta["calls"] = meta.get("calls", 0) + 1
+    if raw_chars is not None:
+        meta["raw_chars"] = raw_chars
+    write_json(meta_path(run_id), meta)
+
+    totals = read_json(totals_path())
+    totals["emitted"] = totals.get("emitted", 0) + emitted
+    if raw_chars is not None:
+        totals["runs"] = totals.get("runs", 0) + 1
+        totals["raw_chars"] = totals.get("raw_chars", 0) + raw_chars
+    write_json(totals_path(), totals)
+
+
+class Counted(io.TextIOBase):
+    """Passes stdout through untouched while counting what crossed it."""
+
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+        self.chars = 0
+
+    def write(self, text: str) -> int:
+        self.chars += len(text)
+        return self.wrapped.write(text)
+
+    def flush(self) -> None:
+        self.wrapped.flush()
+
+    def isatty(self) -> bool:
+        return self.wrapped.isatty()
+
+
+@contextlib.contextmanager
+def counting():
+    counter = Counted(sys.stdout)
+    real, sys.stdout = sys.stdout, counter
+    try:
+        yield counter
+    finally:
+        sys.stdout = real
 
 
 def stored_runs() -> list[Path]:
@@ -396,6 +472,93 @@ def dump_failed_paths(run_id: str) -> None:
     print(" ".join(dict.fromkeys(paths)))
 
 
+def replay_emitted(run_id: str) -> int | None:
+    """The report a stored run printed, reconstructed by re-parsing its log.
+
+    Runs captured before the tally existed carry no count, and the report is a
+    pure function of the log, so it can be recovered rather than lost. Only the
+    report itself: the run also printed its id, and a recovery call may have
+    printed more, neither of which the log records.
+    """
+    log = log_path(run_id)
+    if not log.exists():
+        return None
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            with log.open(errors="replace") as handle:
+                parsed = parse(handle, echo=False)
+            report(run_id, parsed, log)
+    except Exception:
+        return None
+    return len(buffer.getvalue())
+
+
+def percentage(saved: int, raw: int) -> str:
+    """A saving short of the whole log never rounds up to 100%, which would
+    read as nothing emitted at all, and a small loss keeps its sign rather
+    than rounding to a negative zero."""
+    if not raw:
+        return "n/a"
+    share = saved / raw * 100
+    if 0 < 100 - share < 0.05:
+        return ">99.9%"
+    if share and abs(share) < 0.05:
+        return f"{share:.2f}%"
+    return f"{share:.1f}%"
+
+
+def audit(run_id: str | None) -> int:
+    if run_id:
+        meta = read_json(meta_path(run_id))
+        raw = meta.get("raw_chars") or log_path(run_id).stat().st_size
+        emitted = meta.get("emitted")
+        calls = meta.get("calls")
+        reconstructed = emitted is None
+        if reconstructed:
+            emitted = replay_emitted(run_id)
+            calls = 1
+        if emitted is None:
+            sys.exit(f"jest-lens: cannot audit `{run_id}`")
+        label = "Total calls"
+    else:
+        totals = read_json(totals_path())
+        if not totals.get("runs"):
+            sys.exit("jest-lens: no runs tallied yet")
+        raw, emitted, calls = totals["raw_chars"], totals["emitted"], totals["runs"]
+        reconstructed = False
+        label = "Total runs"
+
+    saved = raw - emitted
+    if not raw:
+        sys.exit(f"jest-lens: `{run_id}` stored no output to audit")
+    rows = [
+        (label, f"{calls:,}", ""),
+        ("Raw", f"{raw:,}", f"{raw // 4:,}"),
+        ("Emitted", f"{emitted:,}", f"{emitted // 4:,}"),
+        ("Saved", f"{saved:,}", f"{int(saved / 4):,}"),
+    ]
+    name = max(len(row[0]) for row in rows)
+    chars = max(max(len(row[1]) for row in rows), len("chars"))
+    tokens = max(max(len(row[2]) for row in rows), len("est tokens"))
+
+    print(f"{'':<{name}}   {'chars':>{chars}}  {'est tokens':>{tokens}}")
+    for index, (text, one, two) in enumerate(rows):
+        line = f"{text:<{name}} : {one:>{chars}}  {two:>{tokens}}"
+        if text == "Saved":
+            line += f"  ({percentage(saved, raw)})"
+        print(line.rstrip())
+
+    print()
+    print("Token counts are estimated at four characters per token.")
+    print("Emitted counts everything jest-lens printed. A dump filtered through")
+    print("grep, head or a pipe is counted whole, so the real cost may be lower.")
+    if reconstructed:
+        print("This run predates the tally: emitted is reconstructed from its log,")
+        print("and covers the report only, not any recovery call made since.")
+    return 0
+
+
 def list_runs() -> None:
     runs = stored_runs()
     if not runs:
@@ -434,6 +597,8 @@ def main() -> int:
     ap.add_argument("--failed-paths", action="store_true",
                     help="file paths of failing suites, on one line")
     ap.add_argument("--list-runs", action="store_true", help="list stored runs, newest first")
+    ap.add_argument("--audit", action="store_true",
+                    help="what a run cost against reading its raw log; bare, the lifetime totals")
     args = ap.parse_args()
 
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -442,6 +607,15 @@ def main() -> int:
     if args.list_runs:
         list_runs()
         return 0
+
+    if args.audit:
+        clash = [name for name, on in (("--all-failures", args.all_failures),
+                                       ("--console", args.console),
+                                       ("--full-log", args.full_log),
+                                       ("--failed-paths", args.failed_paths)) if on]
+        if clash:
+            ap.error(f"--audit cannot be combined with {clash[0]}")
+        return audit(resolve(args.run) if args.run else None)
 
     # --all-failures and --console are sections of one run and read well together.
     # The other two are not: --full-log already contains both sections, and
@@ -460,15 +634,17 @@ def main() -> int:
             ap.error(f"an ID is required with {(whole + sections)[0]}"
                      " (--list-runs to find one)")
         run_id = resolve(args.run)
-        if args.full_log:
-            dump_logs(run_id)
-        elif args.failed_paths:
-            dump_failed_paths(run_id)
-        else:
-            if args.all_failures:
-                dump_sections(run_id, want_console=False)
-            if args.console:
-                dump_sections(run_id, want_console=True)
+        with counting() as counter:
+            if args.full_log:
+                dump_logs(run_id)
+            elif args.failed_paths:
+                dump_failed_paths(run_id)
+            else:
+                if args.all_failures:
+                    dump_sections(run_id, want_console=False)
+                if args.console:
+                    dump_sections(run_id, want_console=True)
+        tally(run_id, counter.chars)
         return 0
 
     if sys.stdin.isatty():
@@ -484,12 +660,15 @@ def main() -> int:
 
     run_id = new_run_id()
     log = log_path(run_id)
-    print(f"RUN ID: {run_id}", flush=True)
 
     def on_sigint(_sig, _frame):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, on_sigint)
+
+    counter = Counted(sys.stdout)
+    sys.stdout = counter
+    print(f"RUN ID: {run_id}", flush=True)
 
     with open_private(log, buffering=1) as sink:
         try:
@@ -501,16 +680,17 @@ def main() -> int:
             return 130
 
     code, result = report(run_id, parsed, log)
-    with open_private(meta_path(run_id)) as meta:
-        json.dump(
-            {
-                "cwd": os.getcwd(),
-                "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "result": result,
-                "counts": parsed.counts,
-            },
-            meta,
-        )
+    sys.stdout = counter.wrapped
+    write_json(
+        meta_path(run_id),
+        {
+            "cwd": os.getcwd(),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "result": result,
+            "counts": parsed.counts,
+        },
+    )
+    tally(run_id, counter.chars, raw_chars=log.stat().st_size)
     prune()
     return code
 
